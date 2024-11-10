@@ -16,3 +16,6 @@ For this system of a reservoir (R), selector valve (V), syringe pump (P), and re
 R-->V-->P (when in refill mode) and P-->V-->X (when in running mode).
 
 The microfludic example also contains an interpreter for writting the connections consicely.
+
+# Python Version
+3.12 or greater
