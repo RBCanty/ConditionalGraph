@@ -1,5 +1,4 @@
-from types import SimpleNamespace
-from typing import Self, Iterable, Literal
+from typing import Self, Iterable, Literal, Collection, Callable
 
 from abstractions import GenericStatefulGraph, CONSISTENT, Direction
 
@@ -14,7 +13,7 @@ class Volume:
     def __init__(self, name: str, volume: float):
         self.name = name
         self.volume = volume
-        self._flow_rate = 0.0
+        self.flow_rate = 0.0
 
     def __repr__(self):
         return f"Volume('{self.name}', {self.volume})"
@@ -24,7 +23,7 @@ class Volume:
 
 
 class Segment(GenericStatefulGraph[Volume]):
-    _nodes: dict[str, Self] = {}
+    nodes: dict[str, Self] = {}
 
     def __init__(self, name: str, volume: float):
         super().__init__(Volume(name, volume))
@@ -38,8 +37,20 @@ class Segment(GenericStatefulGraph[Volume]):
         return self.data.volume
 
     @property
+    def parents(self):
+        return self.connections().parents
+
+    @property
+    def children(self):
+        return self.connections().children
+
+    @property
     def flow_rate(self):
-        return self.data._flow_rate  # noqa
+        return self.data.flow_rate
+
+    @flow_rate.setter
+    def flow_rate(self, rate: float):
+        self.data.flow_rate = rate
 
     @property
     def duration(self) -> Minutes:
@@ -47,17 +58,40 @@ class Segment(GenericStatefulGraph[Volume]):
             return Minutes(0)
         return Minutes(self.volume / self.flow_rate)
 
-    @property
-    def all_nodes(self):
-        return self._nodes.values()
+    @classmethod
+    def reset_flow_rates(cls):
+        """ Sets all flow rates to 0.0 """
+        for rfr_segment in cls.nodes.values():
+            rfr_segment.flow_rate = 0.0
+
+    def _propagate_flow_rate(self, _master_sources: Collection[str] = None):
+        if _master_sources is None:
+            _master_sources = []
+        if self.name not in _master_sources:
+            self.flow_rate = sum(source.flow_rate for source in self.parents)
+        for child in self.children:  # type: Segment
+            child._propagate_flow_rate(_master_sources)
+
+    @classmethod
+    def set_flow_rates(cls, **src_flow_rates: float):
+        """ Provided a dictionary of source flow rates, determine all down-stream flow rates.
+        If a source intercepts the downstead of another source, all prior"""
+        cls.reset_flow_rates()
+        for source_name, source_flow_rate in src_flow_rates.items():
+            source: Segment | None = cls.nodes.get(source_name, None)
+            if source is None:
+                print(f"FlowRateSetWarning: '{source_name}' not found.")
+                continue
+            source.flow_rate = source_flow_rate
+            source._propagate_flow_rate(src_flow_rates.keys())
 
     def _add_child(self, child: Self, component_state_id: str, state_name: str):
         super()._add_child(child, component_state_id, state_name)
-        self._nodes.setdefault(child.name, child)
+        self.nodes.setdefault(child.name, child)
 
     def _add_parent(self, parent: Self, component_state_id: str, state_name: str):
         super()._add_parent(parent, component_state_id, state_name)
-        self._nodes.setdefault(parent.name, parent)
+        self.nodes.setdefault(parent.name, parent)
 
     def __str__(self):
         header = f"{self.name} ({self.volume} uL)"
@@ -84,140 +118,116 @@ class Segment(GenericStatefulGraph[Volume]):
 
         return f"{header}\n{body}"
 
-    def volume_to(self, target_name: str, direction: Direction = Direction.DOWN) -> float | None:
-        """ Calculates the cumulative volume from the current node to the target (does not include the volume of the
-         final node). """
+    def volume_to(self, target_name: str, direction: Direction = Direction.DOWN, include_final_node=False) -> float | None:
+        """ Calculates the cumulative volume from the current node to the target. """
         traversals = self.traverse(lambda n: n.name == target_name, direction=direction)
         if not traversals:
             return None
-        (final, path), *other = traversals
-        if other:
+        final, path = traversals[0]
+        if traversals[1:]:
             raise RuntimeError(f"Multiple paths to target {target_name} from {self.name}: "
                                f"{[_p for _, _p in traversals]}")
         volume = 0.0
-        for segment in path:  # type: Segment
+        for segment in path:
             volume += segment.volume
-
+        if include_final_node:
+            return volume
         return volume - final.volume
 
-    def duration_to(self, target_name: str, direction: Direction = Direction.DOWN) -> Minutes | None:
-        """ Calculates the longest duration from the current node to the target (does not include the volume of the
-         final node).  Requires having first set flow rates for sources.
+    def duration_to(self, target_name: str, direction: Direction = Direction.DOWN, include_final_node=False) -> Minutes | None:
+        """ Calculates the longest duration from the current node to the target.
+        Requires having first set flow rates for sources.
         """
         traversals = self.traverse(lambda n: n.name == target_name, direction=direction)
         if not traversals:
             return None
-        (final, path), *other = traversals
-        if other:
+        final, path = traversals[0]
+        if traversals[1:]:
             raise RuntimeError(f"Multiple paths to target {target_name} from {self.name}: "
                                f"{[_p for _, _p in traversals]}")
         duration = Minutes(0)
         # print(f"Inspecting: {print_path(path)}")
-        for segment in path:  # type: Segment
+        for segment in path:
             duration += segment.duration
         # print(f"\tDuration = {duration - final.duration}")
-
+        if include_final_node:
+            return duration
         return duration - final.duration
 
-    def reset_flow_rates(self):
-        for rfr_segment in self._nodes.values():
-            rfr_segment.data._flow_rate = 0.0
-
-    def _build_flow_rates_between(self,
-                                  target_name: str,
-                                  **src_flow_rates: float
-                                  ) -> tuple[set[Self], list[list[Self]]]:
-        if target_name not in self._nodes:
-            raise LookupError(f"Target '{target_name}' not found!")
-
-        self.reset_flow_rates()
-
-        for source_name, source_flow_rate in src_flow_rates.items():
-            source: Segment = self._nodes.get(source_name, None)
-            if source is None:
-                continue
-            source.data._flow_rate = source_flow_rate
-
-        path_elements: dict[str, SimpleNamespace[Segment, bool]] = {}
-        valid_sources: set[Segment] = set()
-        valid_paths: list[list[Segment]] = []
-
-        for source_name in src_flow_rates.keys():
-            source: Segment = self._nodes.get(source_name, None)
-            if source is None:
-                continue
-            traversals = source.traverse(lambda n: n.name == target_name)
-            if not traversals:
-                continue
-            (_, path), *other = traversals
-            if other:
-                raise RuntimeError(f"Multiple paths to target {target_name} from {source.name}: "
-                                   f"{[_p for _, _p in traversals]}")
-            valid_sources.add(source)
-            valid_paths.append(path)
-            for segment in path:  # type: Segment
-                if segment.name == target_name or segment.name in src_flow_rates.keys():
-                    continue
-                path_elements.setdefault(segment.name, SimpleNamespace(seg=segment, updated=False))
-
-        first_pass = True  # Python, give me a do-while, please
-        _iterations = 0
-        while first_pass or any([_rec.updated for _rec in path_elements.values()]):
-            first_pass = False
-            for _rec in path_elements.values():
-                segment: Segment = _rec.seg
-                old_value = segment.flow_rate
-                new_value = sum([_seg.flow_rate for _seg in segment.connections().parents], start=0.0)
-                if old_value != new_value:
-                    segment.data._flow_rate = new_value
-                    _rec.updated = True
-                else:
-                    _rec.updated = False
-            _iterations += 1
-            if _iterations > 1000:
-                raise TimeoutError(f"Flow rates failed to converge")
-
-        return valid_sources, valid_paths
-
-    def time_from(self, **src_flow_rates: float) -> Minutes | None:
+    def time_from(self, *source_names: str, include_final_node: bool = False) -> Minutes | None:
         """ Calculates the time required for the current Node to receive the updated flow conditions from the sources
          specified in src_flow_rates. """
-        try:
-            valid_sources, _ = self._build_flow_rates_between(self.name, **src_flow_rates)
-        except LookupError:
+        source_nodes = [self.nodes[source] for source in source_names if source in self.nodes]
+        if not source_nodes:
             return None
+        durations = [source.duration_to(self.name, include_final_node=include_final_node) for source in source_nodes]
+        durations = [d for d in durations if d is not None]
+        return max(durations, default=Minutes(0))
 
-        durations = max([source.duration_to(self.name) for source in valid_sources], default=Minutes(0))
+    @classmethod
+    def check_flow_stability(cls, critical_flow_ratio: float | Iterable[float] = 10.0) -> tuple[set[str], float]:
+        """ Inspects all junctions and reports (all bad junctions, the worst flow ratio).
 
-        self.reset_flow_rates()
+        If critical_flow_ratio is a tuple it is treated as (intercept, linear coefficient, quadratic coefficient, ...)
+         where critical_flow_ratio(# inlets) = slope * (# inlets) + intercept.
 
-        return durations
+        Suggested values:
+         - Conservative ( 0, 2.0) --> (# inlets, C.F.R.): [(2, 4), (3, 6), (4, 8)]
+         - Liberal      (-2, 3.5) --> (# inlets, C.F.R.): [(2, 5), (3, 8.5), (4, 10)]
+        """
+        unstable_segments: set[str] = set()
+        largest_ratio = float('-Inf')
+        if isinstance(critical_flow_ratio, Iterable):
+            cfr: Callable[[float], float] = lambda n: sum(_a*(n**_p) for _p, _a in enumerate(critical_flow_ratio))
+        else:
+            cfr: Callable[[float], float] = lambda _: critical_flow_ratio
+        for segment in cls.nodes.values():
+            inlet_rates = [_p.flow_rate for _p in segment.parents if _p.flow_rate > 0]
+            if not inlet_rates:
+                continue
+
+            # # Scheme 1: Compare the most extreme individual flow rates
+            # flow_ratio = max(inlet_rates) / min(inlet_rates)
+
+            # # Scheme 2: Compare the most extreme collective flow rates
+            # flow_ratio = max(
+            #     sum(inlet_rates[:idx] + inlet_rates[idx+1:]) / ifr for idx, ifr in enumerate(inlet_rates)
+            # )
+
+            # # Scheme 3: Use flow fraction  <-- This is the scheme Nikolai and Jeff use when talking about 4:1 and 10:1
+            flow_ratio = sum(inlet_rates) / min(inlet_rates)
+
+            largest_ratio = max(largest_ratio, flow_ratio)
+
+            if flow_ratio > cfr(len(inlet_rates)):
+                unstable_segments.add(segment.name)
+        return unstable_segments, largest_ratio
 
     def check_flow_stability_from(self,
+                                  *source_names: str,
                                   critical_flow_ratio=10.0,
-                                  **src_flow_rates: float
                                   ) -> tuple[set[str], float] | None:
         """ Inspects nodes with >1 parent for the ratio of volumetric flow rates.  Provides a set of all Nodes
          with ratios exceeding this ratio and the worst (largest) ratio observed. """
-        try:
-            _, paths = self._build_flow_rates_between(self.name, **src_flow_rates)
-        except LookupError:
+        source_nodes = [self.nodes[source] for source in source_names if source in self.nodes]
+        if not source_nodes:
             return None
+
+        nodes_to_check = set()
+        for source in source_nodes:
+            for _, paths in source.traverse(lambda n: n.name == self.name):
+                nodes_to_check.update(paths)
 
         unstable_segments: set[str] = set()
         largest_ratio = float('-Inf')
-
-        for path in paths:
-            for segment in path:
-                inlet_rates = [_p.flow_rate for _p in segment.connections().parents if _p.flow_rate > 0]
-                if not inlet_rates:
-                    continue
-                flow_ratio = max(inlet_rates) / min(inlet_rates)
-                largest_ratio = max(largest_ratio, flow_ratio)
-                if flow_ratio > critical_flow_ratio:
-                    unstable_segments.add(segment.name)
-
-        self.reset_flow_rates()
+        for node in nodes_to_check:
+            inlet_rates = [_p.flow_rate for _p in node.parents if _p.flow_rate > 0]
+            if not inlet_rates:
+                continue
+            flow_ratio = max(inlet_rates) / min(inlet_rates)
+            largest_ratio = max(largest_ratio, flow_ratio)
+            if flow_ratio > critical_flow_ratio:
+                unstable_segments.add(node.name)
 
         return unstable_segments, largest_ratio
 
@@ -451,7 +461,7 @@ class Interpreter:
         """ Given a graph, produce the header for a specification file for re-use. """
         all_nodes = sorted(
             sorted(
-                flow_graph.all_nodes,
+                flow_graph.nodes.values(),
                 key=lambda n: n.has_children(True),
                 reverse=True),
             key=lambda n: n.has_parents(True),
