@@ -66,5 +66,6 @@ if __name__ == '__main__':
     print("\n====\n")
 
     test_flow_rates = {'Syringe_1': 55, 'Syringe_2': 90, 'Pump': 55}
-    print(my_reactor['Reactor'].time_from(**test_flow_rates))
-    print(my_reactor['Reactor'].check_flow_stability_from(**test_flow_rates))
+    my_reactor['Reactor'].set_flow_rates(**test_flow_rates)
+    print(my_reactor['Reactor'].time_from(*test_flow_rates.keys()))
+    print(my_reactor['Reactor'].check_flow_stability_from(*test_flow_rates.keys()))

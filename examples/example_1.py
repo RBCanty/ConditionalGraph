@@ -37,7 +37,8 @@ if __name__ == '__main__':
 
     test_flow_rates = {'Syringe_1': 55, 'Syringe_2': 90, 'Syringe_3': 55}
 
-    duration_syringes_to_ftir = my_reactor['ftir'].time_from(**test_flow_rates)
+    starting_at.set_flow_rates(**test_flow_rates)
+    duration_syringes_to_ftir = my_reactor['ftir'].time_from(*test_flow_rates.keys())
 
     print(f"FTIR will experience the new flow condition {duration_syringes_to_ftir} minutes "
           f"after the flow rates have been set to {test_flow_rates}")

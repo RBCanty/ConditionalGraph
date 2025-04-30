@@ -45,6 +45,7 @@ if __name__ == '__main__':
     # Inspect junctions for flow rates that exceed 10:1 (that could cause flow instability)
     print("\n====\n")
     test_flow_rates = {'Syringe_1': 55, 'Syringe_2': 90, 'Syringe_3': 55}
-    points_of_instability, worst_ratio = my_reactor['ftir'].check_flow_stability_from(**test_flow_rates)
+    starting_at.set_flow_rates(**test_flow_rates)
+    points_of_instability, worst_ratio = my_reactor['ftir'].check_flow_stability_from(*test_flow_rates.keys())
     print(f"The worst ratio of incoming volumetric flow rates observed was: {round(worst_ratio, 1)}:1")
     print(f"All junctions where said ratio was above 10:1 are: {points_of_instability}")
